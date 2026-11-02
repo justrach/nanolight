@@ -75,6 +75,29 @@ pub const Index = struct {
         ix.sort();
     }
 
+    /// Looks again for apps (one installed or removed since); counts carry
+    /// over by name, and nothing changes when the list is the same.
+    pub fn rescan(ix: *Index, io: std.Io, home: ?[]const u8) void {
+        var fresh: Index = .init(ix.gpa);
+        fresh.scan(io, home);
+        same: {
+            if (fresh.apps.items.len != ix.apps.items.len) break :same;
+            for (fresh.apps.items, ix.apps.items) |a, b| {
+                if (!std.mem.eql(u8, a.path, b.path)) break :same;
+            }
+            fresh.deinit();
+            return;
+        }
+        for (fresh.apps.items, fresh.launches.items) |a, *l| {
+            if (ix.find(a.name)) |i| l.* = ix.launches.items[i];
+        }
+        // Icons are asked for again after a change; that is cheap and rare.
+        const old = ix.*;
+        ix.* = fresh;
+        var gone = old;
+        gone.deinit();
+    }
+
     fn scanDir(ix: *Index, io: std.Io, dir_path: []const u8, depth: u8) void {
         var dir = std.Io.Dir.cwd().openDir(io, dir_path, .{ .iterate = true }) catch return;
         defer dir.close(io);
@@ -220,4 +243,34 @@ test "names are kept once, sorted, and opening one suggests it" {
     ix.launches.items[0] = 0;
     ix.load(mem.store());
     try t.expectEqual(@as(u16, 2), ix.launches.items[0]);
+}
+
+test "rescan finds a new app, keeps counts, and leaves an unchanged list alone" {
+    const t = std.testing;
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(t.io, "Applications/Alpha.app");
+    var buf: [128]u8 = undefined;
+    const home = try std.fmt.bufPrint(&buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    var ix: Index = .init(t.allocator);
+    defer ix.deinit();
+    ix.scan(t.io, home);
+    const before = ix.apps.items.len;
+    try t.expect(ix.find("Alpha") != null);
+    try t.expect(ix.find("Beta") == null);
+    ix.launches.items[ix.find("Alpha").?] = 3;
+
+    // Nothing changed: the same list stays.
+    const names_ptr = ix.names.items.ptr;
+    ix.rescan(t.io, home);
+    try t.expectEqual(names_ptr, ix.names.items.ptr);
+
+    // An app installed since: found, and the counts stay with their names.
+    try tmp.dir.createDirPath(t.io, "Applications/Beta.app");
+    ix.rescan(t.io, home);
+    try t.expectEqual(before + 1, ix.apps.items.len);
+    try t.expect(ix.find("Beta") != null);
+    try t.expectEqual(@as(u16, 3), ix.launches.items[ix.find("Alpha").?]);
+    try t.expectEqual(@as(u16, 0), ix.launches.items[ix.find("Beta").?]);
 }

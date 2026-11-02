@@ -51,6 +51,8 @@ pub const Live = struct {
     s: *Nanolight,
     o: *Onboard,
     kv: nanoui.kv.Store,
+    io: std.Io,
+    home: ?[]const u8,
     choice: shortcut.Choice = .cmd_space,
     window: ?*nanoui.Window = null,
     /// The system's glass under the panel, which the window's views keep.
@@ -303,6 +305,8 @@ pub const Live = struct {
         const top = ph - (f.origin.y + f.size.height);
         // The panel there; the window is the shadow's margin bigger.
         w.setPosition(f.origin.x + (f.size.width - view.width) / 2 - view.shadow_margin, top + f.size.height * 0.2 - view.shadow_margin);
+        // An app installed since the last look should be found.
+        l.s.index.rescan(l.io, l.home);
         l.s.reveal();
         w.show();
         l.through.start();
@@ -453,7 +457,7 @@ pub fn main(init: std.process.Init) !void {
     var o: Onboard = .{};
     var s: Nanolight = .{ .index = &index, .kv = kv, .onboard = &o };
     defer s.query.deinit();
-    var live: Live = .{ .app = app, .s = &s, .o = &o, .kv = kv, .choice = shortcut.load(kv, init.gpa) };
+    var live: Live = .{ .app = app, .s = &s, .o = &o, .kv = kv, .io = init.io, .home = init.environ_map.get("HOME"), .choice = shortcut.load(kv, init.gpa) };
     s.host = live.host();
     // Google's completions are on unless turned off from the menu bar.
     if (kv.get(init.gpa, suggest_key) catch null) |v| {
