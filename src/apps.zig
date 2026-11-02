@@ -37,12 +37,16 @@ pub const Index = struct {
     /// Times each was opened.
     launches: std.ArrayList(u16) = .empty,
     icons: std.AutoHashMapUnmanaged(u32, ?Icon) = .empty,
+    /// Lists replaced by `rescan`, kept until `deinit`.
+    retired: std.ArrayList(Index) = .empty,
 
     pub fn init(gpa: std.mem.Allocator) Index {
         return .{ .gpa = gpa, .arena = .init(gpa) };
     }
 
     pub fn deinit(ix: *Index) void {
+        for (ix.retired.items) |*r| r.deinit();
+        ix.retired.deinit(ix.gpa);
         var it = ix.icons.valueIterator();
         while (it.next()) |v| if (v.*) |i| ix.gpa.free(i.png);
         ix.icons.deinit(ix.gpa);
@@ -91,11 +95,14 @@ pub const Index = struct {
         for (fresh.apps.items, fresh.launches.items) |a, *l| {
             if (ix.find(a.name)) |i| l.* = ix.launches.items[i];
         }
-        // Icons are asked for again after a change; that is cheap and rare.
-        const old = ix.*;
+        // The panel may still hold the old paths and icon bytes until its
+        // next frame, so the old index is kept (and freed in `deinit`)
+        // rather than freed here. Only when an app was added or removed.
+        var old = ix.*;
+        fresh.retired = old.retired;
+        old.retired = .empty;
+        fresh.retired.append(ix.gpa, old) catch {};
         ix.* = fresh;
-        var gone = old;
-        gone.deinit();
     }
 
     fn scanDir(ix: *Index, io: std.Io, dir_path: []const u8, depth: u8) void {
