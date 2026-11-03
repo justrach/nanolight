@@ -133,7 +133,8 @@ pub const Results = struct {
         // is less than a row: one completion fewer pays for it, so the
         // panel never grows past its tallest (view.max_height).
         var pane_rows: [max_panes]search.Ranked = undefined;
-        const np = if (isSettings(query)) 0 else panes.rank(query, &pane_rows);
+        // Panes get only the rows left after the handoffs and their header.
+        const np = if (isSettings(query)) 0 else @min(panes.rank(query, &pane_rows), max_rows -| r.n -| handoffs -| 1);
         for (pane_rows[0..np]) |x| r.push(.{ .kind = .pane, .app = x.index, .match = x.match });
         // The search for what was typed, its completions (as many as leave
         // room for the rest), then Grok and X.
@@ -278,4 +279,16 @@ test "System Settings' panes come under the apps and keep the panel's height (#1
     // Math lists no panes.
     r.build("2+2", &ix, &.{}, &.{});
     try t.expectEqual(@as(usize, 1), r.n);
+}
+
+test "a full list of apps and panes still fits (typing crashed: integer overflow)" {
+    if (!mac) return error.SkipZigTest;
+    const t = std.testing;
+    var ix = try testIndex(t.allocator, &.{ "Time A", "Time B", "Time C", "Time D", "Time E", "Time F" });
+    defer ix.deinit();
+    var r: Results = .{};
+    r.build("time", &ix, &.{}, &.{ "t1", "t2", "t3", "t4" });
+    try t.expect(r.n <= max_rows - 1);
+    try t.expectEqual(Kind.pane, r.rows[max_apps].kind);
+    try t.expectEqual(Kind.search_x, r.rows[r.n - 1].kind);
 }
