@@ -17,8 +17,6 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.17.0
-      - name: Which panes this runner has
-        run: sh .github/which.sh
       - run: zig build test
       - run: zig build app
       - run: zig build -Dtarget=x86_64-windows-gnu --prefix zig-out/windows
