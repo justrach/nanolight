@@ -1,0 +1,30 @@
+# Temporary: where General's extension is on each runner macOS. Never merged.
+name: probe-panes
+on:
+  pull_request:
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, macos-15, macos-26]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - run: |
+          sw_vers -productVersion
+          for p in "/System/Library/ExtensionKit/Extensions/Shell.appex" \
+                   "/System/Library/ExtensionKit/Extensions/GeneralSettings.appex" \
+                   "/System/Applications/System Settings.app/Contents/PlugIns/Shell.appex" \
+                   "/System/Applications/System Settings.app/Contents/PlugIns/GeneralSettings.appex"; do
+            if [ -e "$p" ]; then
+              echo "YES $p -> $(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$p/Contents/Info.plist" 2>&1)"
+            else
+              echo "NO  $p"
+            fi
+          done
+          echo "--- who declares the General id, anywhere under ExtensionKit or System Settings"
+          for d in /System/Library/ExtensionKit/Extensions/*.appex "/System/Applications/System Settings.app/Contents/PlugIns/"*.appex; do
+            i=$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$d/Contents/Info.plist" 2>/dev/null)
+            [ "$i" = "com.apple.systempreferences.GeneralSettings" ] && echo "GENERAL: $d"
+          done
+          echo done
