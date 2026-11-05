@@ -52,6 +52,15 @@ margin=$((($3 - 680) / 2))
 rect="$(($1 + margin + 56)),$(($2 + margin + 14)),60,32"
 echo "      watching $rect"
 
+# A word and its delete that don't count. The first key after a launch can hold
+# the main thread for over a second (1.2 s in 2 of 71 first launches on CI's
+# macOS 26): the word is then not up when `before` is taken, shows for a moment
+# after it, and reads as having gone back.
+keys 'keystroke "calendar"'
+sleep 3
+keys 'key code 51 using option down'
+sleep 1
+
 back=0
 blind=0
 frames=0
