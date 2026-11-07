@@ -249,3 +249,74 @@ test "file answers move icons only for the current enabled query" {
     s.rebuild();
     try t.expectEqual(@as(usize, 0), s.found.n);
 }
+
+test "file parent labels own a frame snapshot before deferred layout" {
+    const ui = @import("nanoui").ui;
+    const files_view = @import("files_view.zig");
+    const t = std.testing;
+    var ix: Index = .init(t.allocator);
+    defer ix.deinit();
+    var s: view.Nanolight = .{ .index = &ix };
+    defer s.found.deinit();
+    defer s.query.deinit();
+    const path = "/nanolight-synthetic-parent/document.txt";
+    const expected = "/nanolight-synthetic-parent";
+    s.found.add(path, false, .{ .score = 1 });
+    // Build nodes only: text is measured after row() has returned. No
+    // TextSystem is needed until layout, which this ownership test avoids.
+    var c: ui.Context = .init(t.allocator, undefined);
+    defer c.deinit();
+    c.begin();
+    files_view.row(&s, &c, @import("palette.zig").palette(false, .system), 0, .{ .kind = .file, .file = 0 });
+    var parent: ?[]const u8 = null;
+    for (c.nodes.items) |n| switch (n.content) {
+        .text => |text| if (std.mem.eql(u8, text.str, expected)) {
+            parent = text.str;
+        },
+        else => {},
+    };
+    const label = parent orelse return error.MissingParentLabel;
+    // Not a borrowed slice of the file entry (or, for home-relative
+    // labels on macOS, the helper's temporary stack buffer).
+    try t.expect(label.ptr != s.found.entries[0].path().ptr);
+    @memset(s.found.entries[0].bytes[0..expected.len], 'x');
+    try t.expectEqualStrings(expected, label);
+}
+
+test "home-relative file parents survive multiple rows and native text layout" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const ui = @import("nanoui").ui;
+    const files = @import("files.zig");
+    const t = std.testing;
+    const home = files.home();
+    if (home.len == 0) return error.SkipZigTest;
+    var ix: Index = .init(t.allocator);
+    defer ix.deinit();
+    var s: view.Nanolight = .{ .index = &ix };
+    defer s.found.deinit();
+    defer s.query.deinit();
+    // Synthetic paths only: nothing is read from the home directory.
+    for ([_][]const u8{ "/NanolightTestOne/document.txt", "/NanolightTestTwo/document.txt" }) |suffix| {
+        var path: [files.max_path]u8 = undefined;
+        s.found.add(try std.fmt.bufPrint(&path, "{s}{s}", .{ home, suffix }), false, .{ .score = 1 });
+    }
+    const Build = struct {
+        fn draw(state: *view.Nanolight, c: *ui.Context) void {
+            const col = ui.div(c).column().wFull();
+            defer col.end();
+            for (0..state.found.n) |i| {
+                const row = ui.div(c).row().wFull().h(40);
+                defer row.end();
+                @import("files_view.zig").row(state, c, @import("palette.zig").palette(false, .system), i, .{ .kind = .file, .file = @intCast(i) });
+            }
+        }
+    };
+    var tester: ui.Tester = undefined;
+    try tester.init(t.allocator, .init(&s, Build.draw), .{ .width = 680, .height = 160 });
+    defer tester.deinit();
+    for (0..4) |_| {
+        try t.expect(tester.hasText("~/NanolightTestOne"));
+        try t.expect(tester.hasText("~/NanolightTestTwo"));
+        tester.frame();
+    }
+}

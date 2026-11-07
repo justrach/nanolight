@@ -62,17 +62,12 @@ pub const Theme = enum {
         };
     }
 
-    /// The panel's corners, and its glass's.
+    /// The panel's corners, and its glass's: the same for every theme, so
+    /// switching one changes only its tint and glyph, never the window's
+    /// shape (#41). 18, or theme.json's rounding on Linux.
     pub fn radius(t: Theme) f32 {
-        return switch (t) {
-            // 18, or theme.json's rounding on Linux, as its colors.
-            .system => @import("linux_theme.zig").radius(),
-            .ocean => 24,
-            .forest => 12,
-            .rose => 28,
-            .amber => 8,
-            .violet => 20,
-        };
+        _ = t;
+        return @import("linux_theme.zig").radius();
     }
 
     /// What's typed in the search bar, in points.
@@ -162,6 +157,17 @@ test "System keeps the bar as it was; each theme has its own" {
     for (Theme.all[1..], 0..) |a, i| for (Theme.all[i + 2 ..]) |b| {
         try t.expect(!@import("std").mem.eql(u8, a.glyphOn(true), b.glyphOn(true)));
     };
+}
+
+test "every theme keeps the same corners (#41)" {
+    const t = @import("std").testing;
+    for (Theme.all) |th| try t.expectEqual(Theme.system.radius(), th.radius());
+    // Stepping through the themes, as Settings does, never reshapes the panel.
+    var th: Theme = .system;
+    for (0..Theme.all.len * 2) |_| {
+        th = th.step(1);
+        try t.expectEqual(@as(f32, 18), th.radius());
+    }
 }
 
 test "off the Mac a theme names only an icon nanoui can draw" {
