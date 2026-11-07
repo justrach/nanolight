@@ -51,6 +51,12 @@ From the [latest release](https://github.com/justrach/nanolight/releases/latest)
 brew tap justrach/nanolight https://github.com/justrach/nanolight && brew install --cask justrach/nanolight/nanolight
 ```
 
+With [nanobrew](https://github.com/justrach/nanobrew) (needs a nanobrew release newer than v0.1.215, with [justrach/nanobrew#504](https://github.com/justrach/nanobrew/pull/504); `nb update` first):
+
+```sh
+nb install --cask justrach/nanolight/nanolight
+```
+
 This repository is the tap; the cask installs the signed `.dmg` from [Releases](https://github.com/justrach/nanolight/releases/latest), and Nanolight updates itself after that. Use the full `justrach/nanolight/nanolight` name: Homebrew 7 only loads a cask from a third-party tap once you name it (or `brew trust` the tap), so a bare `brew install --cask nanolight` is refused. The cask is [`Casks/nanolight.rb`](Casks/nanolight.rb); after a release, `sh macos/update-cask.sh vX.Y.Z` refreshes it.
 
 On first run a short welcome picks the key that opens it and says who else holds it. On the Mac that's ⌘Space, ⌥Space, ⌃Space or ⌥⌘Space (any other, such as ⌥X, can be recorded later in Settings; Spotlight gives up ⌘Space in System Settings → Keyboard → Keyboard Shortcuts → Spotlight); on a PC, Alt Space, Ctrl Alt Space, Ctrl Space or Ctrl Shift Space. Releases update themselves from this repository's releases, restarting into the new version while the panel is away.
