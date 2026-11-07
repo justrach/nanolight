@@ -49,7 +49,9 @@ pub fn row(s: *Nanolight, c: *ui.Context, p: Palette, i: usize, r: Row) void {
     const e = &s.found.entries[r.file];
     ui.richText(c, e.name(), s.highlight(i, r, p), .{ .size = 13.5, .weight = .medium, .color = p.text.alpha(0.82) });
     var buf: [files.max_path]u8 = undefined;
-    ui.text(c, files.parent(&buf, e.path()), .{ .size = 12, .color = p.sub.alpha(0.8), .truncate = .ellipsis });
+    // text() borrows until layout, after row() returns. A home-relative
+    // parent lives in buf, so snapshot it in the frame arena first (#42).
+    ui.textf(c, .{ .size = 12, .color = p.sub.alpha(0.8), .truncate = .ellipsis }, "{s}", .{files.parent(&buf, e.path())});
     ui.text(c, if (e.folder) "Folder" else "File", .{ .size = 11.5, .color = p.sub });
 }
 
