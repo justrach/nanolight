@@ -85,6 +85,8 @@ pub const Nanolight = struct {
     /// The query the rows were built for.
     built: u64 = 1,
     host: ?Host = null,
+    /// The clipboard's recent texts, kept by the host (clipboard.zig); null when off.
+    history: ?*@import("clipboard.zig").History = null,
     /// Draws its own Liquid Glass (over a desktop nanoui painted, as the
     /// film does); otherwise the window's system glass is under it.
     own_glass: bool = false,
@@ -136,12 +138,15 @@ pub const Nanolight = struct {
     preview_url: []const u8 = "",
     /// Settings, drawn in the panel in place of the rows.
     settings_ui: settings_view.Settings = .{},
+    /// The clipboard's history, drawn there too (clipboard_view.zig).
+    clip: @import("clipboard_view.zig").View = .{},
     ext: ?*@import("raycast_view.zig").Ext = null,
 
     /// Called as it is shown: the query selected, the keys its own.
     pub fn reveal(s: *Nanolight) void {
         s.back();
         s.settings_ui.hide();
+        s.clip.hide();
         s.shown +%= 1;
         // Suggestions follow what was opened since.
         s.built = 1;
@@ -153,6 +158,7 @@ pub const Nanolight = struct {
     /// The panel's height for what it shows.
     pub fn height(s: *const Nanolight) f32 {
         if (s.settings_ui.open) return settings_view.height;
+        if (s.clip.open) return rows_height;
         if (s.ext) |e| if (e.open) return e.height();
         if (s.previewing) return max_height;
         return rows_height;
@@ -192,6 +198,7 @@ pub const Nanolight = struct {
             return;
         };
         if (s.settings_ui.open) return s.settings_ui.inPanel(c, s, p);
+        if (s.clip.open) return s.clip.inPanel(c, s, p);
         // A Raycast extension's command, while it runs (raycast_view.zig).
         if (s.ext) |e| if (e.open) return e.panel(c, s, p);
 
@@ -241,6 +248,8 @@ pub const Nanolight = struct {
         }
         // ⌘,: Settings, as on the Mac. The comma never reaches the field.
         if (c.shortcut(.{ .key = ',', .cmd = true })) return s.openSettings();
+        // ⌘⇧V: the clipboard's history, "paste, but more".
+        if (c.shortcut(.{ .key = 'v', .cmd = true, .shift = true })) return s.openClipboard();
         // ⌘↩: a search in the browser rather than in the panel.
         if (c.shortcut(.{ .key = S.enter, .cmd = true })) s.activateOut(c);
         // Tab takes the faint completion, as → does.
@@ -355,6 +364,7 @@ pub const Nanolight = struct {
         const ns = s.index.suggestions(&sug);
         var web: [suggest.max_rows][]const u8 = undefined;
         s.res.claude = s.claude_on;
+        s.res.clipboard = s.history != null;
         s.res.build(s.query.text(), s.index, sug[0..ns], s.web.slices(&web), &s.found);
         if (s.res.n > 0 and s.res.rows[0].kind == .currency) {
             if (s.fx) |a| {
@@ -456,6 +466,10 @@ pub const Nanolight = struct {
                 ui.text(c, "Nanolight Settings", .{ .size = 13.5, .weight = .medium, .color = p.text });
                 ui.text(c, "Shortcut, sync, updates", .{ .size = 12, .color = p.sub.alpha(0.8) });
             },
+            .clipboard => {
+                ui.text(c, "Clipboard History", .{ .size = 13.5, .weight = .medium, .color = p.text });
+                ui.text(c, "Recent copies", .{ .size = 12, .color = p.sub.alpha(0.8) });
+            },
             .suggest => {
                 const w = s.web.get(r.web);
                 ui.richText(c, w, s.added(i, w, p), .{ .size = 13.5, .color = p.text.alpha(0.72), .truncate = .ellipsis });
@@ -478,7 +492,7 @@ pub const Nanolight = struct {
         }
         ui.spacer(c);
         if (i == s.sel) {
-            ui.text(c, if (r.kind == .app or r.kind == .file or r.kind == .settings or r.kind == .pane) "Open" else "Go", .{ .size = 12, .weight = .medium, .color = p.sub });
+            ui.text(c, if (r.kind == .app or r.kind == .file or r.kind == .settings or r.kind == .clipboard or r.kind == .pane) "Open" else "Go", .{ .size = 12, .weight = .medium, .color = p.sub });
             ui.kbd(c, "↩");
         } else if (i < 9) ui.textf(c, .{ .size = 12, .weight = .medium, .color = p.sub.alpha(0.5), .tabular = true }, "{s}{d}", .{ results.mod, i + 1 });
     }
@@ -514,6 +528,7 @@ pub const Nanolight = struct {
             .search_web => "globe",
             .suggest => "magnifyingglass",
             .settings => "gearshape",
+            .clipboard => "doc.on.clipboard",
             else => "app.dashed",
         }, .{ .size = if (big) 16 else 13, .weight = .medium, .color = p.text });
     }
@@ -600,6 +615,7 @@ pub const Nanolight = struct {
             .ask_grok, .ask_claude, .search_x => s.go(results.url(&s.url_buf, r.kind, s.query.text())),
             .search_web => s.search(s.query.text(), !s.searches_out),
             .settings => s.openSettings(),
+            .clipboard => s.openClipboard(),
             .pane => s.go(@import("settings_panes.zig").urls[r.app]),
             .suggest => {
                 // Its words fill the field, as a search box's would.
@@ -635,6 +651,14 @@ pub const Nanolight = struct {
     pub fn openSettings(s: *Nanolight) void {
         s.back();
         s.settings_ui.show();
+    }
+
+    /// The history in place of the rows, the field its filter.
+    pub fn openClipboard(s: *Nanolight) void {
+        if (s.history == null) return;
+        s.back();
+        s.query.clear();
+        s.clip.show();
     }
 
     /// The rows again, the page gone.

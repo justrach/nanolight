@@ -8,6 +8,7 @@ const view = @import("view.zig");
 const settings_view = @import("settings_view.zig");
 const tests = @import("tests.zig");
 const suggest = @import("suggest.zig");
+const clipboard = @import("clipboard.zig");
 const mac = @import("builtin").os.tag == .macos;
 const placeholder = "Search apps, do math, ask Grok…";
 
@@ -102,7 +103,7 @@ test "Settings hides the menu bar icon and sends searches out (issues #8, #10)" 
     t.settle(1);
     try std.testing.expect(prefs.menu_bar_on and !s.searches_out and !prefs.searches_out.?);
     // The rows fit: the last one is inside Settings, Settings in the window.
-    const quit = t.findText("Quit Nanolight").?;
+    const quit = t.findText("Back").?;
     try std.testing.expect(quit.y + quit.h <= settings_view.height);
     try std.testing.expect(settings_view.height <= view.max_height);
 }
@@ -350,7 +351,7 @@ test "Ask Claude is off until Settings turns it on, and stays as it was left" {
     try t.clickText("Ask Claude");
     t.settle(1);
     // The switch and everything under it fit Settings, on every platform.
-    const quit = t.findText("Quit Nanolight").?;
+    const quit = t.findText("Back").?;
     try std.testing.expect(quit.y + quit.h <= settings_view.height);
     try std.testing.expect(settings_view.height <= view.max_height);
     try std.testing.expect(s.claude_on and settings_view.loadClaude(mem.store(), gpa));
@@ -373,4 +374,65 @@ test "Ask Claude is off until Settings turns it on, and stays as it was left" {
     t.settle(1);
     try std.testing.expect(!t.containsText("Ask Claude"));
     try std.testing.expect(s.sel < s.res.n);
+}
+
+test "Clipboard History is a Settings switch: off clears what it holds, and the choice is saved" {
+    if (!mac) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    var ix: Index = .init(gpa);
+    defer ix.deinit();
+    var mem: nanoui.kv.Memory = .{ .gpa = gpa };
+    defer mem.deinit();
+    var web: tests.Web = .{};
+    var hist: clipboard.History = .{ .gpa = gpa };
+    defer hist.deinit();
+    try hist.push("copied");
+    var s: view.Nanolight = .{ .index = &ix, .kv = mem.store(), .history = &hist };
+    defer s.query.deinit();
+    s.host = web.host();
+    s.reveal();
+    var t: ui.Tester = undefined;
+    try t.init(gpa, .init(&s, view.Nanolight.view), .{ .width = view.width, .height = view.max_height, .dark = true });
+    defer t.deinit();
+    s.openSettings();
+    t.settle(1);
+    try std.testing.expect(hist.on);
+    // The row's there, and the footer stays inside the panel.
+    const back = t.findText("Back").?;
+    try std.testing.expect(back.y + back.h <= settings_view.height);
+    try std.testing.expect(settings_view.height <= view.max_height);
+    // ↓ to the last row scrolls it into view; the footer hasn't moved.
+    while (!t.containsText("Quit Nanolight")) {
+        _ = t.shortcut(.{ .key = ui.Shortcut.down });
+        t.settle(1);
+        try std.testing.expect(s.settings_ui.sel < 20);
+    }
+    try std.testing.expectEqual(back.y, t.findText("Back").?.y);
+    const quit = t.findText("Quit Nanolight").?;
+    try std.testing.expect(quit.y + quit.h <= back.y);
+    // ↑ to the first row brings it back, and the Terms line scrolls to itself.
+    while (s.settings_ui.sel > 0) {
+        _ = t.shortcut(.{ .key = ui.Shortcut.up });
+        t.settle(1);
+    }
+    try std.testing.expect(t.containsText("Record…"));
+    while (!t.containsText("Terms & Privacy") or s.settings_ui.sel < 9) {
+        _ = t.shortcut(.{ .key = ui.Shortcut.down });
+        t.settle(1);
+        try std.testing.expect(s.settings_ui.sel < 20);
+    }
+    try std.testing.expectEqual(@as(usize, 9), s.settings_ui.sel);
+    try t.clickText("Clipboard History");
+    t.settle(1);
+    try std.testing.expect(!hist.on and hist.items.items.len == 0);
+    const v = try mem.store().get(gpa, clipboard.enabled_key);
+    defer gpa.free(v.?);
+    try std.testing.expectEqualStrings("0", v.?);
+
+    // Without a history (not the Mac's case in the app) there's no row.
+    s.history = null;
+    s.settings_ui.hide();
+    s.openSettings();
+    t.settle(1);
+    try std.testing.expect(!t.containsText("Clipboard History"));
 }

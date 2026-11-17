@@ -33,6 +33,8 @@ pub const Kind = enum {
     suggest,
     /// Nanolight's own Settings, listed when the query asks for them.
     settings,
+    /// Nanolight's clipboard history, listed when the query asks for it.
+    clipboard,
     /// A pane of System Settings (`Row.app` its place in settings_panes.zig).
     pane,
 
@@ -43,7 +45,7 @@ pub const Kind = enum {
             .currency => "Currency",
             .app => "Application",
             .file => "File",
-            .settings => "Nanolight",
+            .settings, .clipboard => "Nanolight",
             .pane => "System Settings",
             .ask_grok, .ask_claude, .search_x, .search_web, .suggest => "Web",
         };
@@ -57,6 +59,7 @@ pub const Kind = enum {
             .app => "Open Application",
             .file => "Open",
             .settings => "Open Settings",
+            .clipboard => "Open Clipboard History",
             .pane => "Open in System Settings",
             .ask_grok => "Ask Grok",
             .ask_claude => "Ask Claude",
@@ -70,7 +73,7 @@ pub const Kind = enum {
             .calc, .currency => "Calculator",
             .app => if (suggested) "Suggestions" else "Applications",
             .file => "Files",
-            .settings => "Nanolight",
+            .settings, .clipboard => "Nanolight",
             .pane => "System Settings",
             .search_web, .suggest => "Google",
             .ask_grok, .ask_claude, .search_x => "Ask & Search",
@@ -103,6 +106,8 @@ pub const Results = struct {
     n: usize = 0,
     /// Claude's row is listed, which Settings turns on.
     claude: bool = false,
+    /// The clipboard history's row is listed, where a history exists.
+    clipboard: bool = false,
     /// No query: the apps are suggestions, nothing else is listed.
     suggested: bool = false,
     /// The math's answer, as shown.
@@ -142,6 +147,7 @@ pub const Results = struct {
         var ranked: [max_apps]search.Ranked = undefined;
         const n = search.rankApps(query, ix, boost, &ranked);
         const settings = isSettings(query);
+        const clip = r.clipboard and isClipboard(query);
         // Math and currency keep their answer and matching apps, without handoffs.
         if (r.n > 0 and (r.rows[0].kind == .calc or r.rows[0].kind == .currency)) {
             for (ranked[0..n]) |x| r.push(.{ .kind = .app, .app = x.index, .match = x.match });
@@ -152,12 +158,12 @@ pub const Results = struct {
         // One row pays for each section head beyond the original three, so
         // a full list stays one length.
         const heads: usize = 2 + @as(usize, @intFromBool(n > 0)) + @as(usize, @intFromBool(np > 0)) +
-            @as(usize, @intFromBool(settings)) + @as(usize, @intFromBool(found.n > 0));
+            @as(usize, @intFromBool(settings or clip)) + @as(usize, @intFromBool(found.n > 0));
         const limit = max_rows -| (heads -| 3);
         // The web rows that always follow the apps: Google, Grok, X, and
         // Claude when it's on.
         const handoffs: usize = 3 + @as(usize, @intFromBool(r.claude));
-        const fixed = handoffs + @as(usize, @intFromBool(settings));
+        const fixed = handoffs + @as(usize, @intFromBool(settings)) + @as(usize, @intFromBool(clip));
         const first_pane: usize = @intFromBool(np > 0);
         const file_row: usize = @intFromBool(found.n > 0);
         // Apps come first. Panes and files are sure of a row each and take
@@ -174,6 +180,7 @@ pub const Results = struct {
         // "settings" / "preferences": Nanolight's own screen, right under
         // the apps: Return still opens System Settings, a key away from this.
         if (settings) r.push(.{ .kind = .settings });
+        if (clip) r.push(.{ .kind = .clipboard });
         for (pane_rows[0..pane_count]) |x| r.push(.{ .kind = .pane, .app = x.index, .match = x.match });
         if (!found.exact) for (0..count) |i| {
             r.push(.{ .kind = .file, .file = @intCast(i), .match = found.entries[i].match });
@@ -186,6 +193,14 @@ pub const Results = struct {
         r.push(.{ .kind = .ask_grok });
         if (r.claude) r.push(.{ .kind = .ask_claude });
         r.push(.{ .kind = .search_x });
+    }
+
+    /// "clipboard", "clip", "history" and "paste history", the words people type for this.
+    fn isClipboard(query: []const u8) bool {
+        const keys = [_][]const u8{ "clipboard", "clip", "history", "paste history", "clipboard history" };
+        const q = std.mem.trim(u8, query, " ");
+        for (keys) |k| if (std.ascii.eqlIgnoreCase(q, k)) return true;
+        return false;
     }
 
     /// "settings" and "preferences", the words people type for this.
@@ -219,7 +234,7 @@ pub fn url(buf: []u8, kind: Kind, query: []const u8) []const u8 {
         .ask_claude => "https://claude.ai/new?q=",
         .search_x => "https://x.com/search?f=live&q=",
         .search_web, .suggest => "https://www.google.com/search?q=",
-        .calc, .currency, .app, .file, .settings, .pane => return "",
+        .calc, .currency, .app, .file, .settings, .clipboard, .pane => return "",
     };
     var w: std.Io.Writer = .fixed(buf);
     w.writeAll(base) catch return "";
@@ -322,6 +337,20 @@ test "math first, then apps; ask and search only without an answer" {
     try t.expectEqual(Kind.app, r.rows[0].kind);
     try t.expectEqual(@as(u32, 1), r.rows[0].app);
     try t.expectEqual(Kind.settings, r.rows[1].kind);
+    // "clipboard" and its other words list Nanolight's history row.
+    r.clipboard = true;
+    for ([_][]const u8{ "clipboard", "Clip", "history", "paste history" }) |q| {
+        r.build(q, &ix, &.{}, &.{}, &.{});
+        var found = false;
+        for (r.rows[0..r.n]) |row| found = found or row.kind == .clipboard;
+        try t.expect(found);
+    }
+    r.build("clipboards", &ix, &.{}, &.{}, &.{});
+    for (r.rows[0..r.n]) |row| try t.expect(row.kind != .clipboard);
+    // Without a history (no Mac) there's no row to list.
+    r.clipboard = false;
+    r.build("clipboard", &ix, &.{}, &.{}, &.{});
+    for (r.rows[0..r.n]) |row| try t.expect(row.kind != .clipboard);
     // A full list of apps still ends with every handoff.
     var many_ix = try testIndex(t.allocator, &.{ "Safari", "Mail", "Maps", "Pages", "Calendar", "Calculator", "FaceTime" });
     defer many_ix.deinit();

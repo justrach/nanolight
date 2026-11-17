@@ -73,6 +73,8 @@ pub const Live = struct {
     asking_len: usize = 0,
     waiting: u32 = 0,
     files: @import("files_live.zig").State = .{},
+    /// What was copied anywhere, for the panel (clipboard.zig); the Mac's.
+    history: @import("clipboard.zig").History,
     /// Updates from GitHub's releases (a signed build only), and the menu
     /// bar icon whose menu offers one once it's ready.
     updater: ?*nanoui.Updater = null,
@@ -117,6 +119,13 @@ pub const Live = struct {
             // Its count went up: the other Macs suggest it too.
             if (l.acct) |*a| a.changed();
         }
+    }
+
+    /// Every 500 ms, whatever was copied since (clipboard_mac.zig).
+    fn tickClipboard(ctx: ?*anyopaque) callconv(.c) void {
+        const l: *Live = @ptrCast(@alignCast(ctx.?));
+        @import("clipboard_mac.zig").poll(&l.history);
+        nanoui.App.after(500, l, tickClipboard);
     }
 
     // ----- sync (account.zig) -----
@@ -577,9 +586,18 @@ pub fn main(init: std.process.Init) !void {
     var s: Nanolight = .{ .index = &index, .kv = kv, .onboard = &o };
     defer s.query.deinit();
     defer s.found.deinit();
-    var live: Live = .{ .app = app, .s = &s, .o = &o, .kv = kv, .choice = shortcut.load(kv, init.gpa) };
+    var live: Live = .{ .app = app, .s = &s, .o = &o, .kv = kv, .choice = shortcut.load(kv, init.gpa), .history = .{ .gpa = app.gpa } };
+    defer live.history.deinit();
     s.host = live.host();
     @import("files_live.zig").load(&live);
+    // The clipboard's history, on the Mac: on unless turned off in Settings.
+    if (mac) {
+        if (kv.get(init.gpa, @import("clipboard.zig").enabled_key) catch null) |v| {
+            defer init.gpa.free(v);
+            live.history.on = !std.mem.eql(u8, v, "0");
+        }
+        s.history = &live.history;
+    }
     // Google's completions are on unless turned off in Settings.
     if (kv.get(init.gpa, suggest_key) catch null) |v| {
         defer init.gpa.free(v);
@@ -608,6 +626,9 @@ pub fn main(init: std.process.Init) !void {
     rc.init(&live, init.environ_map);
     defer rc.deinit(&live);
     rc.rescan(&live);
+    // The first tick keeps what's on the clipboard already: the copy made
+    // just before launching is often why the panel is opened.
+    if (mac) Live.tickClipboard(&live);
     // The newest launch is the one that stays; it hears `--toggle` (single.zig).
     if (single.claim(.{ .ctx = &live, .func = Live.command }) > 0) std.log.info("nanolight: asked an older copy to quit", .{});
     panel.setup(app, live.window.?, &s, if (o.active) o.height() else s.height());

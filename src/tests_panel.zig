@@ -244,3 +244,58 @@ test "a full list has no gap under it, and a selected row doesn't shift" {
     try std.testing.expectEqual(before.x, selected.x);
     try std.testing.expectEqual(before.y, selected.y);
 }
+
+test "the clipboard's history: filtered, walked, deleted, copied, left" {
+    const gpa = std.testing.allocator;
+    var ix: Index = .init(gpa);
+    defer ix.deinit();
+    var h: @import("clipboard.zig").History = .{ .gpa = gpa };
+    defer h.deinit();
+    for ([_][]const u8{ "zig build test", "lunch at noon", "Zig fmt src", "ssh prod" }) |w| try h.push(w);
+    var s: view.Nanolight = .{ .index = &ix, .history = &h };
+    defer s.query.deinit();
+    s.reveal();
+    var t: ui.Tester = undefined;
+    try t.init(gpa, .init(&s, view.Nanolight.view), .{ .width = view.width, .height = view.max_height });
+    defer t.deinit();
+    t.settle(1);
+    tests.press(&t, &.{.{ .insert = "words" }});
+    // ⌘⇧V: the history, newest first, the field empty to filter it.
+    try expect(t.shortcut(.{ .key = 'v', .cmd = true, .shift = true }));
+    t.frame();
+    try expect(s.clip.open);
+    try std.testing.expectEqualStrings("", s.query.text());
+    try expect(t.hasText("ssh prod") and t.hasText("zig build test"));
+    // The filter folds case; ↓ moves down what it lets through.
+    tests.press(&t, &.{.{ .insert = "ZIG" }});
+    try expect(!t.hasText("ssh prod") and t.hasText("zig build test"));
+    _ = t.shortcut(.{ .key = ui.Shortcut.down });
+    _ = t.shortcut(.{ .key = 'p', .ctrl = true });
+    _ = t.shortcut(.{ .key = 'n', .ctrl = true });
+    try std.testing.expectEqual(@as(usize, 1), s.clip.sel);
+    // ⌘⌫ deletes the selected one, the oldest "zig"; the other is left.
+    try expect(t.shortcut(.{ .key = 0x7f, .cmd = true }));
+    t.frame();
+    try std.testing.expectEqual(@as(usize, 3), h.items.items.len);
+    try expect(!t.hasText("zig build test") and t.hasText("Zig fmt src"));
+    // Return copies it, first in the history again, and leaves the view.
+    tests.press(&t, &.{ .{ .command = .select_all }, .{ .command = .delete_backward }, .{ .insert = "lunch" } });
+    t.textOps(&.{.{ .command = .insert_newline }});
+    try std.testing.expectEqualStrings("lunch at noon", t.clipboard.items);
+    try std.testing.expectEqualStrings("lunch at noon", h.items.items[0].text);
+    try expect(!s.clip.open);
+    // Esc goes back to search; turned off, the view says so.
+    h.setOn(false);
+    try expect(t.shortcut(.{ .key = 'v', .cmd = true, .shift = true }));
+    t.frame();
+    try expect(t.hasText("Clipboard History is off"));
+    try expect(t.shortcut(.{ .key = ui.Shortcut.escape }));
+    t.frame();
+    try expect(!s.clip.open);
+    try expect(t.hasText("Search apps, do math, ask Grok…"));
+    // Its row, from the search, opens it too.
+    tests.press(&t, &.{.{ .insert = "clipboard" }});
+    try std.testing.expectEqual(results.Kind.clipboard, s.res.rows[s.sel].kind);
+    t.textOps(&.{.{ .command = .insert_newline }});
+    try expect(s.clip.open);
+}
