@@ -29,6 +29,8 @@ const ClickThrough = if (mac) @import("clickthrough.zig").ClickThrough else @imp
 const Recorder = if (mac) @import("recorder.zig").Recorder else @import("pc_stubs.zig").Recorder;
 const account = @import("account.zig");
 const rc = @import("raycast_live.zig");
+const browse = @import("browse.zig");
+const browse_install = @import("browse_install.zig");
 const Settings = @import("settings.zig").Settings;
 const suggest_key = "nanolight.suggest";
 /// "1": Return opens searches in the browser (issue #10).
@@ -88,13 +90,23 @@ pub const Live = struct {
     /// Raycast script commands, run by Nanolight itself (script_run.zig).
     scripts: @import("script_run.zig").Runner = undefined,
     env: ?*const std.process.Environ.Map = null,
+    /// browse companion integration (`browse.zig`, `browse_install.zig`).
+    browse_idx: browse.Index,
+    browse_installer: browse_install.State = .{},
+    browse_path_buf: [std.fs.max_path_bytes]u8 = undefined,
+    browse_path_len: usize = 0,
     /// The next `hide` is skipped: a command just took the panel.
     keep_open: bool = false,
 
     fn host(l: *Live) view.Host {
         const bind = @import("settings_bind.zig");
         bind.box.ctx = l;
-        return .{ .ctx = l, .open = open, .hide = hide, .resize = resize, .suggest = ask, .rates = askRates, .files = if (mac) @import("files_live.zig").askFiles else null, .preview = if (mac) showPage else null, .settings = &bind.box };
+        return .{ .ctx = l, .open = open, .hide = hide, .resize = resize, .suggest = ask, .rates = askRates, .files = if (mac) @import("files_live.zig").askFiles else null, .preview = if (mac) showPage else null, .install_browse = if (mac) installBrowseHook else null, .settings = &bind.box };
+    }
+
+    fn installBrowseHook(ctx: *anyopaque) void {
+        const l: *Live = @ptrCast(@alignCast(ctx));
+        l.startInstallBrowse();
     }
 
     fn open(ctx: *anyopaque, target: []const u8) void {
@@ -253,9 +265,79 @@ pub const Live = struct {
             .escape => l.s.back(),
             .open_out => {
                 var buf: [2048]u8 = undefined;
-                open(l, l.preview.current(&buf) orelse l.s.preview_url);
+                var bbuf: [browse.max_url_len]u8 = undefined;
+                const raw = l.preview.current(&buf) orelse l.s.preview_url;
+                const target = if (l.s.useBrowse()) browse.openUrl(&bbuf, raw) else raw;
+                open(l, target);
                 hide(l);
             },
+        }
+        if (l.window) |w| w.redraw();
+    }
+
+    pub fn refreshBrowse(l: *Live) void {
+        if (comptime !mac) return;
+        const io = l.app.io;
+        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        if (browse.detectInstalledPath(io, l.env, &path_buf)) |p| {
+            const n = @min(p.len, l.browse_path_buf.len);
+            @memcpy(l.browse_path_buf[0..n], p[0..n]);
+            l.browse_path_len = n;
+            l.s.browse_installed = true;
+            var idx_buf: [std.fs.max_path_bytes]u8 = undefined;
+            if (browse.defaultIndexPath(l.env, &idx_buf)) |ixp| {
+                l.browse_idx.reloadIfChanged(io, ixp);
+            }
+        } else {
+            l.browse_path_len = 0;
+            l.s.browse_installed = false;
+            l.browse_idx.clear();
+        }
+        l.s.built = 1;
+    }
+
+    pub fn setUseBrowse(l: *Live, on: bool) void {
+        l.s.browse_on = on;
+        l.kv.set(browse.enabled_key, if (on) "1" else "0") catch {};
+        l.refreshBrowse();
+        if (l.window) |w| w.redraw();
+    }
+
+    pub fn startInstallBrowse(l: *Live) void {
+        if (comptime !mac) return;
+        if (l.s.browse_installed and l.browse_path_len > 0) {
+            _ = apps.launch(l.app.io, l.browse_path_buf[0..l.browse_path_len]);
+            hide(l);
+            return;
+        }
+        _ = browse_install.start(l.app.gpa, l.app.io, l.env, &l.browse_installer, .{
+            .ctx = l,
+            .on_progress = onBrowseProgress,
+            .on_done = onBrowseInstalled,
+        });
+        if (l.window) |w| w.redraw();
+    }
+
+    fn onBrowseProgress(ctx: *anyopaque) void {
+        const l: *Live = @ptrCast(@alignCast(ctx));
+        if (l.window) |w| w.redraw();
+    }
+
+    fn onBrowseInstalled(ctx: *anyopaque, ok: bool) void {
+        const l: *Live = @ptrCast(@alignCast(ctx));
+        if (ok) {
+            const p = l.browse_installer.installedPath();
+            if (p.len > 0) {
+                if (l.s.index.findPath(p) == null) {
+                    l.s.index.add("browse", p) catch {};
+                }
+                _ = apps.launch(l.app.io, p);
+            }
+            l.s.browse_installed = true;
+            l.s.browse_on = true;
+            l.kv.set(browse.enabled_key, "1") catch {};
+            l.refreshBrowse();
+            l.s.rebuild();
         }
         if (l.window) |w| w.redraw();
     }
@@ -365,6 +447,7 @@ pub const Live = struct {
         // Freed a key in System Settings, quit a launcher: look again.
         if (l.o.active) l.o.refresh();
         panel.place(w);
+        l.refreshBrowse();
         rc.refresh(l);
         l.s.reveal();
         w.show();
@@ -577,8 +660,19 @@ pub fn main(init: std.process.Init) !void {
     var s: Nanolight = .{ .index = &index, .kv = kv, .onboard = &o };
     defer s.query.deinit();
     defer s.found.deinit();
-    var live: Live = .{ .app = app, .s = &s, .o = &o, .kv = kv, .choice = shortcut.load(kv, init.gpa) };
+    var live: Live = .{
+        .app = app,
+        .s = &s,
+        .o = &o,
+        .kv = kv,
+        .choice = shortcut.load(kv, init.gpa),
+        .env = init.environ_map,
+        .browse_idx = .init(init.gpa),
+    };
+    defer live.browse_idx.deinit();
     s.host = live.host();
+    s.browse_index = &live.browse_idx;
+    s.browse_installer = &live.browse_installer;
     @import("files_live.zig").load(&live);
     // Google's completions are on unless turned off in Settings.
     if (kv.get(init.gpa, suggest_key) catch null) |v| {
@@ -590,6 +684,7 @@ pub fn main(init: std.process.Init) !void {
         s.searches_out = std.mem.eql(u8, v, "1");
     }
     @import("settings_bind.zig").load(&s, kv, init.gpa);
+    live.refreshBrowse();
     s.reveal();
     // The rows first, so a snapshot is as tall as the panel.
     s.rebuild();

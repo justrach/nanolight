@@ -63,6 +63,7 @@ fn show(s: *Nanolight, said: *const suggest.List) void {
         const same_row = now.kind == r.kind and switch (r.kind) {
             .app, .pane => now.app == r.app,
             .file => now.file == r.file,
+            .browse_tab, .browse_bookmark => now.hit == r.hit,
             .suggest => suggest.same(s.web.get(now.web), was_text[0..was_len]),
             else => true,
         };

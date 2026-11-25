@@ -36,4 +36,9 @@ pub const SettingsHost = struct {
     restart: *const fn (ctx: *anyopaque) void,
     welcome: *const fn (ctx: *anyopaque) void,
     quit: *const fn (ctx: *anyopaque) void,
+    use_browse: ?*const fn (ctx: *anyopaque, on: bool) void = null,
+    browse_installed: ?*const fn (ctx: *anyopaque) bool = null,
+    browse_busy: ?*const fn (ctx: *anyopaque) bool = null,
+    browse_status: ?*const fn (ctx: *anyopaque, buf: []u8) []const u8 = null,
+    install_browse: ?*const fn (ctx: *anyopaque) void = null,
 };
