@@ -3,6 +3,7 @@
 const nanoui = @import("nanoui");
 const shortcut = @import("shortcut.zig");
 const account = @import("account.zig");
+const browse = @import("browse.zig");
 const SettingsHost = @import("settings_host.zig").SettingsHost;
 const Theme = @import("palette.zig").Theme;
 pub var box: SettingsHost = .{
@@ -26,6 +27,11 @@ pub var box: SettingsHost = .{
     .restart = restart,
     .welcome = welcome,
     .quit = quit,
+    .use_browse = useBrowse,
+    .browse_installed = browseInstalled,
+    .browse_busy = browseBusy,
+    .browse_status = browseStatus,
+    .install_browse = installBrowse,
 };
 
 const Live = @import("main.zig").Live;
@@ -65,6 +71,9 @@ fn theme(ctx: *anyopaque, t: Theme) void {
 pub fn load(s: *@import("view.zig").Nanolight, kv: nanoui.kv.Store, gpa: @import("std").mem.Allocator) void {
     s.theme = loadTheme(kv, gpa);
     s.claude_on = @import("settings_view.zig").loadClaude(kv, gpa);
+    const ub = kv.get(gpa, browse.enabled_key) catch null;
+    defer if (ub) |v| gpa.free(v);
+    s.browse_on = browse.isEnabled(ub);
 }
 
 /// The theme kept on this Mac, at launch.
@@ -126,4 +135,24 @@ fn welcome(ctx: *anyopaque) void {
 
 fn quit(ctx: *anyopaque) void {
     l(ctx).app.quit();
+}
+
+fn useBrowse(ctx: *anyopaque, on: bool) void {
+    l(ctx).setUseBrowse(on);
+}
+
+fn browseInstalled(ctx: *anyopaque) bool {
+    return l(ctx).s.browse_installed;
+}
+
+fn browseBusy(ctx: *anyopaque) bool {
+    return l(ctx).browse_installer.busy();
+}
+
+fn browseStatus(ctx: *anyopaque, buf: []u8) []const u8 {
+    return l(ctx).browse_installer.statusText(buf);
+}
+
+fn installBrowse(ctx: *anyopaque) void {
+    l(ctx).startInstallBrowse();
 }

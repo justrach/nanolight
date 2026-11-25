@@ -11,17 +11,18 @@ const ui = nanoui.ui;
 const panel = @import("view.zig");
 const shortcut = @import("shortcut.zig");
 const account = @import("account.zig");
+const browse = @import("browse.zig");
 const SettingsHost = @import("settings_host.zig").SettingsHost;
 const Choice = shortcut.Choice;
 const Palette = panel.Palette;
 const mac = @import("builtin").os.tag == .macos;
 
-const RowKind = enum { choice, suggest, files, browser, claude, login, menu_bar, sync, terms, updates, welcome, quit, theme };
+const RowKind = enum { choice, suggest, files, browser, browse, claude, login, menu_bar, sync, terms, updates, welcome, quit, theme };
 const Theme = @import("palette.zig").Theme;
 
 /// As tall as its sections, never past the window. Tighter Mac spacing
-/// fits file search, where searches open, Claude's row and the menu bar icon.
-pub const height: f32 = if (mac) 666 else 620;
+/// fits file search, where searches open, browse integration, Claude's row and the menu bar icon.
+pub const height: f32 = if (mac) 672 else 620;
 
 pub const Settings = struct {
     open: bool = false,
@@ -39,6 +40,11 @@ pub const Settings = struct {
     files: bool = false,
     /// Return sends searches to the browser (`Nanolight.searches_out`).
     browser: bool = false,
+    browse_on: bool = true,
+    browse_installed: bool = false,
+    browse_busy: bool = false,
+    browse_status_buf: [160]u8 = undefined,
+    browse_status: []const u8 = "Install browse",
     claude: bool = false,
     login: bool = false,
     menu_bar: bool = true,
@@ -67,8 +73,23 @@ pub const Settings = struct {
         s.suggest = n.suggest_on;
         s.files = n.files_on;
         s.browser = n.searches_out;
+        s.browse_on = n.browse_on;
+        s.browse_installed = n.browse_installed;
+        s.browse_busy = false;
+        s.browse_status = "Install browse";
+        if (n.browse_installer) |st| {
+            s.browse_busy = st.busy();
+            const txt = st.statusText(&s.browse_status_buf);
+            if (st.currentPhase() != .idle) s.browse_status = txt;
+        }
         s.claude = n.claude_on;
         const h = s.hooks(n) orelse return;
+        if (h.browse_installed) |f| s.browse_installed = f(h.ctx);
+        if (h.browse_busy) |f| s.browse_busy = f(h.ctx);
+        if (h.browse_status) |f| {
+            const st = f(h.ctx, &s.browse_status_buf);
+            if (st.len > 0 and (s.browse_busy or n.browse_installer != null)) s.browse_status = st;
+        }
         s.menu_bar = h.menu_bar(h.ctx, null);
         s.choice = h.choice(h.ctx);
         if (s.choice.preset() == null) s.custom = s.choice;
@@ -128,7 +149,7 @@ pub const Settings = struct {
     }
 
     fn body(s: *Settings, c: *ui.Context, n: *panel.Nanolight, p: Palette, rows: []const RowKind) void {
-        const col = ui.div(c).column().wFull().px(20).pt(2).pb(6).gap(if (mac) 6 else 10).grow();
+        const col = ui.div(c).column().wFull().px(20).pt(2).pb(6).gap(if (mac) 4 else 10).grow();
         defer col.end();
         label(c, p, "Open Nanolight with");
         s.choices(c, n, p);
@@ -136,6 +157,17 @@ pub const Settings = struct {
         s.switchRow(c, n, p, rows, .suggest, "Google Suggestions");
         if (mac) s.switchRow(c, n, p, rows, .files, "File Search");
         if (mac) s.switchRow(c, n, p, rows, .browser, "Open Searches in Browser");
+        if (mac) {
+            if (s.browse_installed) {
+                s.switchRow(c, n, p, rows, .browse, "Use browse");
+            } else {
+                const btext = if (s.browse_busy or (n.browse_installer != null and n.browse_installer.?.currentPhase() == .failed))
+                    s.browse_status
+                else
+                    "Install browse";
+                s.button(c, n, p, rows, .browse, btext);
+            }
+        }
         s.switchRow(c, n, p, rows, .claude, "Ask Claude");
         label(c, p, "This " ++ @import("results.zig").machine);
         s.switchRow(c, n, p, rows, .login, "Open at Login");
@@ -209,7 +241,7 @@ pub const Settings = struct {
 
     fn switchRow(s: *Settings, c: *ui.Context, n: *panel.Nanolight, p: Palette, rows: []const RowKind, kind: RowKind, title: []const u8) void {
         const on = isSel(rows, s.sel, kind);
-        const d = ui.div(c).row().wFull().h(if (mac) 32 else 36).px(4).gap(10).itemsCenter().rounded(10).control().bg(if (on) p.sel else p.fill.alpha(0));
+        const d = ui.div(c).row().wFull().h(if (mac) 29 else 36).px(4).gap(10).itemsCenter().rounded(10).control().bg(if (on) p.sel else p.fill.alpha(0));
         defer d.end();
         if (d.clicked()) s.flip(n, kind);
         ui.text(c, title, .{ .size = 13.5, .weight = .medium, .color = p.text });
@@ -218,6 +250,7 @@ pub const Settings = struct {
             .suggest => s.suggest,
             .files => s.files,
             .browser => s.browser,
+            .browse => s.browse_on,
             .claude => s.claude,
             .login => s.login,
             .menu_bar => s.menu_bar,
@@ -256,6 +289,13 @@ pub const Settings = struct {
                 n.searches_out = !n.searches_out;
                 s.browser = n.searches_out;
                 if (h) |host| host.searches_out(host.ctx, s.browser);
+            },
+            .browse => {
+                n.browse_on = !n.browse_on;
+                s.browse_on = n.browse_on;
+                n.built = 1;
+                if (n.kv) |kv| kv.set(browse.enabled_key, if (n.browse_on) "1" else "0") catch {};
+                if (h) |host| if (host.use_browse) |f| f(host.ctx, s.browse_on);
             },
             .claude => {
                 n.claude_on = !n.claude_on;
@@ -296,7 +336,7 @@ pub const Settings = struct {
     fn termsLine(s: *Settings, c: *ui.Context, n: *panel.Nanolight, p: Palette, rows: []const RowKind) void {
         const on = isSel(rows, s.sel, .terms);
         ui.key(c, "terms");
-        const line = ui.div(c).row().wFull().h(28).px(4).gap(4).itemsCenter().rounded(8).control().bg(if (on) p.sel else p.fill.alpha(0));
+        const line = ui.div(c).row().wFull().h(if (mac) 24 else 28).px(4).gap(4).itemsCenter().rounded(8).control().bg(if (on) p.sel else p.fill.alpha(0));
         defer line.end();
         if (line.clicked()) s.activate(n, .terms);
         ui.text(c, "Uses your Codegraff account; Codegraff's", .{ .size = 11.5, .color = p.sub.alpha(0.75) });
@@ -313,7 +353,7 @@ pub const Settings = struct {
     fn button(s: *Settings, c: *ui.Context, n: *panel.Nanolight, p: Palette, rows: []const RowKind, kind: RowKind, text: []const u8) void {
         const on = isSel(rows, s.sel, kind);
         ui.key(c, @tagName(kind));
-        const d = ui.div(c).row().wFull().h(36).px(12).gap(8).itemsCenter().rounded(10).control()
+        const d = ui.div(c).row().wFull().h(if (mac) 32 else 36).px(12).gap(8).itemsCenter().rounded(10).control()
             .bg(if (on) p.sel else p.tile.alpha(0.45)).border(p.rim);
         defer d.end();
         if (d.clicked()) s.activate(n, kind);
@@ -390,6 +430,7 @@ pub const Settings = struct {
             // ←/→ step through the four; Return records one's own.
             .choice => if (mac) s.record(n, !s.recording) else s.nudge(n, rowList(s.account), 1),
             .suggest, .files, .browser, .claude, .login, .menu_bar => s.flip(n, kind),
+            .browse => if (s.browse_installed) s.flip(n, .browse) else if (h) |host| if (host.install_browse) |f| f(host.ctx),
             .sync => if (h) |host| switch (s.account) {
                 .signed_out => host.sign_in(host.ctx),
                 .waiting, .signed_in => host.sign_out(host.ctx),
@@ -421,8 +462,8 @@ pub fn loadClaude(kv: nanoui.kv.Store, gpa: std.mem.Allocator) bool {
 
 fn rowList(state: account.State) []const RowKind {
     return switch (state) {
-        .signed_out, .starting => if (mac) &.{ .choice, .suggest, .files, .browser, .claude, .login, .menu_bar, .sync, .terms, .updates, .welcome, .quit, .theme } else &.{ .choice, .suggest, .claude, .login, .sync, .terms, .updates, .welcome, .quit, .theme },
-        .waiting, .signed_in => if (mac) &.{ .choice, .suggest, .files, .browser, .claude, .login, .menu_bar, .sync, .updates, .welcome, .quit, .theme } else &.{ .choice, .suggest, .claude, .login, .sync, .updates, .welcome, .quit, .theme },
+        .signed_out, .starting => if (mac) &.{ .choice, .suggest, .files, .browser, .browse, .claude, .login, .menu_bar, .sync, .terms, .updates, .welcome, .quit, .theme } else &.{ .choice, .suggest, .claude, .login, .sync, .terms, .updates, .welcome, .quit, .theme },
+        .waiting, .signed_in => if (mac) &.{ .choice, .suggest, .files, .browser, .browse, .claude, .login, .menu_bar, .sync, .updates, .welcome, .quit, .theme } else &.{ .choice, .suggest, .claude, .login, .sync, .updates, .welcome, .quit, .theme },
     };
 }
 

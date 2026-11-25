@@ -11,6 +11,7 @@ const files = @import("files.zig");
 const calc = @import("calc.zig");
 const currency = @import("currency.zig");
 const panes = @import("settings_panes.zig");
+const browse = @import("browse.zig");
 const mac = @import("builtin").os.tag == .macos;
 const Index = @import("apps.zig").Index;
 
@@ -25,6 +26,11 @@ pub const Kind = enum {
     currency,
     app,
     file,
+    browse_tab,
+    browse_bookmark,
+    browse_bang,
+    ask_browse,
+    install_browse,
     ask_grok,
     ask_claude,
     search_x,
@@ -43,6 +49,11 @@ pub const Kind = enum {
             .currency => "Currency",
             .app => "Application",
             .file => "File",
+            .browse_tab => "Tab",
+            .browse_bookmark => "Bookmark",
+            .browse_bang => "Search",
+            .ask_browse => "Agent",
+            .install_browse => "Browser",
             .settings => "Nanolight",
             .pane => "System Settings",
             .ask_grok, .ask_claude, .search_x, .search_web, .suggest => "Web",
@@ -56,6 +67,11 @@ pub const Kind = enum {
             .currency => "Copy Amount",
             .app => "Open Application",
             .file => "Open",
+            .browse_tab => "Switch to Tab",
+            .browse_bookmark => "Open Bookmark",
+            .browse_bang => "Search in browse",
+            .ask_browse => "Ask Codegraff",
+            .install_browse => "Install browse",
             .settings => "Open Settings",
             .pane => "Open in System Settings",
             .ask_grok => "Ask Grok",
@@ -70,10 +86,11 @@ pub const Kind = enum {
             .calc, .currency => "Calculator",
             .app => if (suggested) "Suggestions" else "Applications",
             .file => "Files",
+            .browse_tab, .browse_bookmark, .browse_bang, .install_browse => "browse",
             .settings => "Nanolight",
             .pane => "System Settings",
             .search_web, .suggest => "Google",
-            .ask_grok, .ask_claude, .search_x => "Ask & Search",
+            .ask_browse, .ask_grok, .ask_claude, .search_x => "Ask & Search",
         };
     }
 };
@@ -83,6 +100,8 @@ pub const Row = struct {
     /// The app's index (`.app`).
     app: u32 = 0,
     file: u8 = 0,
+    /// Which of `browse_hits` (`.browse_tab` / `.browse_bookmark`).
+    hit: u8 = 0,
     /// Which of the completions (`.suggest`).
     web: u8 = 0,
     /// Which of its name's bytes the query matched.
@@ -103,6 +122,12 @@ pub const Results = struct {
     n: usize = 0,
     /// Claude's row is listed, which Settings turns on.
     claude: bool = false,
+    /// browse companion state for tabs, bookmarks, bangs, Ask Codegraff, and Install CTA.
+    browse_installed: bool = false,
+    browse_on: bool = false,
+    browse_hits: [browse.max_hits]browse.Hit = undefined,
+    browse_n: usize = 0,
+    browse_bang: ?browse.BangMatch = null,
     /// No query: the apps are suggestions, nothing else is listed.
     suggested: bool = false,
     /// The math's answer, as shown.
@@ -120,8 +145,14 @@ pub const Results = struct {
     /// completions (`web`), or
     /// `suggestions` when the query is empty.
     pub fn build(r: *Results, query_in: []const u8, ix: *const Index, suggestions: []const u32, web: []const []const u8, found: *const files.List) void {
+        r.buildWithBrowse(query_in, ix, suggestions, web, found, null);
+    }
+
+    pub fn buildWithBrowse(r: *Results, query_in: []const u8, ix: *const Index, suggestions: []const u32, web: []const []const u8, found: *const files.List, bix: ?*const browse.Index) void {
         const boost = ix.launches.items;
         r.n = 0;
+        r.browse_n = 0;
+        r.browse_bang = null;
         const query = std.mem.trim(u8, query_in, " ");
         r.suggested = query.len == 0;
         if (query.len == 0) {
@@ -149,40 +180,62 @@ pub const Results = struct {
         }
         var pane_rows: [max_panes]search.Ranked = undefined;
         const np = if (settings) 0 else panes.rank(query, &pane_rows);
+        const browse_active = r.browse_installed and r.browse_on;
+        const empty_browse: browse.Index = .{ .gpa = undefined };
+        if (browse_active) {
+            r.browse_bang = browse.resolveBang(bix orelse &empty_browse, query);
+            if (r.browse_bang == null) {
+                if (bix) |bx| r.browse_n = browse.rank(bx, query, &r.browse_hits);
+            }
+        }
+        const install_hit = browse.wantsInstallRow(query, r.browse_installed);
+        const has_browse_sec = r.browse_bang != null or r.browse_n > 0 or install_hit;
         // One row pays for each section head beyond the original three, so
         // a full list stays one length.
         const heads: usize = 2 + @as(usize, @intFromBool(n > 0)) + @as(usize, @intFromBool(np > 0)) +
-            @as(usize, @intFromBool(settings)) + @as(usize, @intFromBool(found.n > 0));
+            @as(usize, @intFromBool(settings)) + @as(usize, @intFromBool(found.n > 0)) +
+            @as(usize, @intFromBool(has_browse_sec));
         const limit = max_rows -| (heads -| 3);
-        // The web rows that always follow the apps: Google, Grok, X, and
-        // Claude when it's on.
-        const handoffs: usize = 3 + @as(usize, @intFromBool(r.claude));
-        const fixed = handoffs + @as(usize, @intFromBool(settings));
+        // The web rows that always follow the apps: Google, Ask Codegraff (when browse
+        // is enabled), Grok, Claude when it's on, and X.
+        const handoffs: usize = 3 + @as(usize, @intFromBool(r.claude)) + @as(usize, @intFromBool(browse_active));
+        const fixed = handoffs + @as(usize, @intFromBool(settings)) + @as(usize, @intFromBool(r.browse_bang != null)) + @as(usize, @intFromBool(install_hit));
         const first_pane: usize = @intFromBool(np > 0);
         const file_row: usize = @intFromBool(found.n > 0);
-        // Apps come first. Panes and files are sure of a row each and take
-        // only what is left: a full list of apps ("hola") leaves room for
-        // two panes, not three.
-        const app_count = @min(n, limit -| fixed -| first_pane -| file_row);
-        const pane_count = @min(np, limit -| fixed -| file_row -| app_count);
-        const count = @min(found.n, limit -| fixed -| app_count -| pane_count);
+        const first_browse: usize = @intFromBool(r.browse_n > 0);
+        // Apps come first. Panes, browse hits, and files each claim a row if present.
+        const app_count = @min(n, limit -| fixed -| first_pane -| file_row -| first_browse);
+        const pane_count = @min(np, limit -| fixed -| file_row -| first_browse -| app_count);
+        const browse_count = @min(r.browse_n, limit -| fixed -| file_row -| app_count -| pane_count);
+        const count = @min(found.n, limit -| fixed -| app_count -| pane_count -| browse_count);
         // An exact path leads, with its siblings under one Files head.
         if (found.exact) for (0..count) |i| {
             r.push(.{ .kind = .file, .file = @intCast(i), .match = found.entries[i].match });
         };
+        if (r.browse_bang != null) r.push(.{ .kind = .browse_bang });
+        if (install_hit) r.push(.{ .kind = .install_browse });
         for (ranked[0..app_count]) |x| r.push(.{ .kind = .app, .app = x.index, .match = x.match });
         // "settings" / "preferences": Nanolight's own screen, right under
         // the apps: Return still opens System Settings, a key away from this.
         if (settings) r.push(.{ .kind = .settings });
         for (pane_rows[0..pane_count]) |x| r.push(.{ .kind = .pane, .app = x.index, .match = x.match });
+        for (0..browse_count) |i| {
+            const h = r.browse_hits[i];
+            r.push(.{
+                .kind = if (h.kind == .tab) .browse_tab else .browse_bookmark,
+                .hit = @intCast(i),
+                .match = h.match,
+            });
+        }
         if (!found.exact) for (0..count) |i| {
             r.push(.{ .kind = .file, .file = @intCast(i), .match = found.entries[i].match });
         };
         // The search for what was typed, its completions (as many as leave
-        // room for the rest), then Grok, Claude if it's on, and X.
+        // room for the rest), then Ask Codegraff (when active), Grok, Claude if it's on, and X.
         const room = limit -| r.n -| handoffs;
         r.push(.{ .kind = .search_web });
         for (0..@min(web.len, max_web, room)) |i| r.push(.{ .kind = .suggest, .web = @intCast(i) });
+        if (browse_active) r.push(.{ .kind = .ask_browse });
         r.push(.{ .kind = .ask_grok });
         if (r.claude) r.push(.{ .kind = .ask_claude });
         r.push(.{ .kind = .search_x });
@@ -219,7 +272,7 @@ pub fn url(buf: []u8, kind: Kind, query: []const u8) []const u8 {
         .ask_claude => "https://claude.ai/new?q=",
         .search_x => "https://x.com/search?f=live&q=",
         .search_web, .suggest => "https://www.google.com/search?q=",
-        .calc, .currency, .app, .file, .settings, .pane => return "",
+        .calc, .currency, .app, .file, .settings, .pane, .browse_tab, .browse_bookmark, .browse_bang, .ask_browse, .install_browse => return "",
     };
     var w: std.Io.Writer = .fixed(buf);
     w.writeAll(base) catch return "";

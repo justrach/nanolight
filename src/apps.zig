@@ -46,7 +46,7 @@ pub fn scanSystem(ix: *Index, io: std.Io, env: *const std.process.Environ.Map) v
 /// An address for the browser or the system (a pane of System Settings),
 /// not a file to open.
 pub fn isUrl(target: []const u8) bool {
-    for ([_][]const u8{ "https://", "http://", @import("settings_panes.zig").url_prefix }) |p| if (std.mem.startsWith(u8, target, p)) return true;
+    for ([_][]const u8{ "https://", "http://", "browse://", @import("settings_panes.zig").url_prefix }) |p| if (std.mem.startsWith(u8, target, p)) return true;
     return false;
 }
 

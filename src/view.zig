@@ -16,6 +16,8 @@ const suggest = @import("suggest.zig");
 const text = @import("text.zig");
 const settings_view = @import("settings_view.zig");
 const SettingsHost = @import("settings_host.zig").SettingsHost;
+const browse = @import("browse.zig");
+const browse_install = @import("browse_install.zig");
 const Row = results.Row;
 
 /// What the panel asks of whatever shows it (the window, or the film).
@@ -34,6 +36,8 @@ pub const Host = struct {
     /// Shows a search's page in the panel, over `webArea`; null takes it
     /// away. Without it, searches open in the browser.
     preview: ?*const fn (ctx: *anyopaque, url: ?[]const u8) void = null,
+    /// Starts in-app installation of browse when requested.
+    install_browse: ?*const fn (ctx: *anyopaque) void = null,
     /// Settings callbacks; without them, changes are not persisted.
     settings: ?*const SettingsHost = null,
 };
@@ -137,6 +141,28 @@ pub const Nanolight = struct {
     /// Settings, drawn in the panel in place of the rows.
     settings_ui: settings_view.Settings = .{},
     ext: ?*@import("raycast_view.zig").Ext = null,
+    /// browse companion state: live index, installed flag, toggle, installer progress.
+    browse_index: ?*const browse.Index = null,
+    browse_installed: bool = false,
+    browse_on: bool = true,
+    browse_installer: ?*const browse_install.State = null,
+    browse_url_buf: [browse.max_url_len]u8 = undefined,
+
+    pub fn useBrowse(s: *const Nanolight) bool {
+        return s.browse_installed and s.browse_on;
+    }
+
+    fn goBrowser(s: *Nanolight, target: []const u8) void {
+        if (s.useBrowse()) {
+            s.go(browse.openUrl(&s.browse_url_buf, target));
+        } else {
+            s.go(target);
+        }
+    }
+
+    fn findBrowseApp(s: *const Nanolight) ?u32 {
+        return s.index.findPath("/Applications/browse.app") orelse s.index.find("browse");
+    }
 
     /// Called as it is shown: the query selected, the keys its own.
     pub fn reveal(s: *Nanolight) void {
@@ -355,7 +381,9 @@ pub const Nanolight = struct {
         const ns = s.index.suggestions(&sug);
         var web: [suggest.max_rows][]const u8 = undefined;
         s.res.claude = s.claude_on;
-        s.res.build(s.query.text(), s.index, sug[0..ns], s.web.slices(&web), &s.found);
+        s.res.browse_installed = s.browse_installed;
+        s.res.browse_on = s.browse_on;
+        s.res.buildWithBrowse(s.query.text(), s.index, sug[0..ns], s.web.slices(&web), &s.found, s.browse_index);
         if (s.res.n > 0 and s.res.rows[0].kind == .currency) {
             if (s.fx) |a| {
                 s.res.answer = @import("currency.zig").format(&s.res.answer_buf, a.value, true);
@@ -452,6 +480,46 @@ pub const Nanolight = struct {
                 ui.text(c, "System Settings", .{ .size = 12, .color = p.sub.alpha(0.8) });
             },
             .file => files_view.row(s, c, p, i, r),
+            .browse_tab => {
+                const hit = s.res.browse_hits[r.hit];
+                const tab = s.browse_index.?.tabs[hit.index];
+                ui.richText(c, tab.title, s.highlight(i, r, p), .{ .size = 13.5, .weight = .medium, .color = p.text.alpha(0.86), .truncate = .ellipsis });
+                const sub = if (tab.space_name.len > 0)
+                    c.print("{s} · {s}", .{ tab.space_name, if (tab.host.len > 0) tab.host else "browse" })
+                else if (tab.host.len > 0)
+                    tab.host
+                else
+                    "browse Tab";
+                ui.text(c, sub, .{ .size = 12, .color = p.sub.alpha(0.8) });
+            },
+            .browse_bookmark => {
+                const hit = s.res.browse_hits[r.hit];
+                const bm = s.browse_index.?.bookmarks[hit.index];
+                ui.richText(c, bm.title, s.highlight(i, r, p), .{ .size = 13.5, .weight = .medium, .color = p.text.alpha(0.86), .truncate = .ellipsis });
+                ui.text(c, if (bm.host.len > 0) bm.host else "browse Bookmark", .{ .size = 12, .color = p.sub.alpha(0.8) });
+            },
+            .browse_bang => {
+                const m = s.res.browse_bang.?;
+                if (m.terms.len > 0) {
+                    ui.textf(c, .{ .size = 13.5, .weight = .medium, .color = p.text, .truncate = .ellipsis }, "Search {s} for “{s}”", .{ m.shortcut.name, m.terms });
+                } else {
+                    ui.textf(c, .{ .size = 13.5, .weight = .medium, .color = p.text, .truncate = .ellipsis }, "Search {s}", .{m.shortcut.name});
+                }
+                ui.textf(c, .{ .size = 12, .color = p.sub.alpha(0.8) }, "!{s} · browse", .{m.shortcut.keyword});
+            },
+            .ask_browse => {
+                ui.textf(c, .{ .size = 13.5, .weight = .medium, .color = p.text, .truncate = .ellipsis }, "Ask Codegraff “{s}”", .{std.mem.trim(u8, q, " ")});
+                ui.text(c, "browse Agent", .{ .size = 12, .color = p.sub.alpha(0.8) });
+            },
+            .install_browse => {
+                var st_buf: [160]u8 = undefined;
+                const title = if (s.browse_installer) |st| switch (st.currentPhase()) {
+                    .idle => "Install browse",
+                    else => st.statusText(&st_buf),
+                } else "Install browse";
+                ui.text(c, title, .{ .size = 13.5, .weight = .medium, .color = p.text });
+                ui.text(c, "Signed macOS browser · Codegraff built in", .{ .size = 12, .color = p.sub.alpha(0.8) });
+            },
             .settings => {
                 ui.text(c, "Nanolight Settings", .{ .size = 13.5, .weight = .medium, .color = p.text });
                 ui.text(c, "Shortcut, sync, updates", .{ .size = 12, .color = p.sub.alpha(0.8) });
@@ -478,7 +546,13 @@ pub const Nanolight = struct {
         }
         ui.spacer(c);
         if (i == s.sel) {
-            ui.text(c, if (r.kind == .app or r.kind == .file or r.kind == .settings or r.kind == .pane) "Open" else "Go", .{ .size = 12, .weight = .medium, .color = p.sub });
+            const act = switch (r.kind) {
+                .app, .file, .settings, .pane, .browse_bookmark => "Open",
+                .browse_tab => "Switch",
+                .install_browse => "Install",
+                else => "Go",
+            };
+            ui.text(c, act, .{ .size = 12, .weight = .medium, .color = p.sub });
             ui.kbd(c, "↩");
         } else if (i < 9) ui.textf(c, .{ .size = 12, .weight = .medium, .color = p.sub.alpha(0.5), .tabular = true }, "{s}{d}", .{ results.mod, i + 1 });
     }
@@ -489,8 +563,9 @@ pub const Nanolight = struct {
 
     /// The row's picture: the app's icon, or a symbol on a quiet tile.
     fn tile(s: *Nanolight, c: *ui.Context, p: Palette, r: Row) void {
-        // A pane: System Settings' own icon.
-        const app = if (r.kind == .pane) s.index.find("System Settings") else if (r.kind == .app) r.app else null;
+        // A pane: System Settings' own icon; Ask Codegraff / bangs: browse's icon when indexed.
+        const browse_app = if (r.kind == .ask_browse or r.kind == .browse_bang) s.findBrowseApp() else null;
+        const app = if (r.kind == .pane) s.index.find("System Settings") else if (r.kind == .app) r.app else browse_app;
         if (app) |a| if (s.index.icon(a)) |png| {
             const box = ui.div(c).size(26, 26).center();
             defer box.end();
@@ -509,6 +584,11 @@ pub const Nanolight = struct {
         ui.icon(c, switch (r.kind) {
             .calc => "plus.forwardslash.minus",
             .currency => "plus.forwardslash.minus",
+            .browse_tab => "macwindow",
+            .browse_bookmark => "bookmark.fill",
+            .browse_bang => "magnifyingglass",
+            .ask_browse => "sparkles",
+            .install_browse => "arrow.down.circle.fill",
             .ask_grok => "sparkles",
             .ask_claude => "sun.max",
             .search_web => "globe",
@@ -558,7 +638,7 @@ pub const Nanolight = struct {
             ui.text(c, "Settings", .{ .size = 1, .color = p.sub.alpha(0) });
         }
         if (s.previewing) {
-            ui.text(c, "Open in Browser", .{ .size = 12, .weight = .medium, .color = p.text.alpha(0.85) });
+            ui.text(c, if (s.useBrowse()) "Open in browse" else "Open in Browser", .{ .size = 12, .weight = .medium, .color = p.text.alpha(0.85) });
             ui.kbd(c, results.mod ++ "↩");
             ui.div(c).w(1).h(14).bg(p.hair).end();
             ui.text(c, "Back", .{ .size = 12, .color = p.sub.alpha(0.8) });
@@ -597,7 +677,24 @@ pub const Nanolight = struct {
                 s.go(s.index.apps.items[r.app].path);
             },
             .file => s.go(s.found.entries[r.file].path()),
-            .ask_grok, .ask_claude, .search_x => s.go(results.url(&s.url_buf, r.kind, s.query.text())),
+            .browse_tab => {
+                const bx = s.browse_index orelse return;
+                const tab = bx.tabs[s.res.browse_hits[r.hit].index];
+                s.go(browse.tabUrl(&s.browse_url_buf, tab.id));
+            },
+            .browse_bookmark => {
+                const bx = s.browse_index orelse return;
+                const bm = bx.bookmarks[s.res.browse_hits[r.hit].index];
+                s.goBrowser(bm.url);
+            },
+            .browse_bang => {
+                const m = s.res.browse_bang orelse return;
+                var tbuf: [browse.max_url_len]u8 = undefined;
+                s.goBrowser(browse.bangTargetUrl(&tbuf, m));
+            },
+            .ask_browse => s.go(browse.askUrl(&s.browse_url_buf, std.mem.trim(u8, s.query.text(), " "))),
+            .install_browse => if (s.host) |h| if (h.install_browse) |f| f(h.ctx),
+            .ask_grok, .ask_claude, .search_x => s.goBrowser(results.url(&s.url_buf, r.kind, s.query.text())),
             .search_web => s.search(s.query.text(), !s.searches_out),
             .settings => s.openSettings(),
             .pane => s.go(@import("settings_panes.zig").urls[r.app]),
@@ -625,7 +722,7 @@ pub const Nanolight = struct {
     fn search(s: *Nanolight, words: []const u8, in_panel: bool) void {
         const h = s.host orelse return;
         const u = results.url(&s.preview_buf, .search_web, words);
-        const show = (if (in_panel) h.preview else null) orelse return s.go(u);
+        const show = (if (in_panel) h.preview else null) orelse return s.goBrowser(u);
         s.preview_url = u;
         s.previewing = true;
         s.preview_q = std.hash.Wyhash.hash(0, s.query.text());

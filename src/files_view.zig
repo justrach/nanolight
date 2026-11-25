@@ -35,6 +35,7 @@ pub fn filesAnswered(s: *Nanolight, typed: []const u8, found: *files.List) void 
         const same = switch (r.kind) {
             .app, .pane => now.app == r.app,
             .file => std.mem.eql(u8, s.found.entries[now.file].path(), path[0..path_len]),
+            .browse_tab, .browse_bookmark => now.hit == r.hit,
             .suggest => now.web == r.web,
             else => true,
         };
