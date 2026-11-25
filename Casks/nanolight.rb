@@ -1,6 +1,6 @@
 cask "nanolight" do
-  version "0.2.12"
-  sha256 "0bf170907358b6826c4bd0127ed4297e5005303291dd9ecedf5e2dda768d5f24"
+  version "0.2.13"
+  sha256 "e66875202bda54782059143390b4eef9aa464d435276c7c362c01ae234d7d483"
 
   url "https://github.com/justrach/nanolight/releases/download/v#{version}/nanolight-macos-arm64.dmg"
   name "Nanolight"
